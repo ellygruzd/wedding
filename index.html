@@ -234,6 +234,28 @@
   .shutter-btn:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
   .shutter-btn svg { width: 22px; height: 22px; flex: none; }
 
+  .gallery-btn {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    gap: .5rem;
+    margin-top: .85rem;
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--ink-soft);
+    font-family: inherit;
+    font-size: .9rem;
+    font-weight: 500;
+    padding: .6rem 1.2rem;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: border-color .15s ease, color .15s ease;
+  }
+  .gallery-btn:hover { border-color: var(--gold); color: var(--ink); }
+  .gallery-btn:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+  .gallery-btn:disabled { opacity: .5; cursor: default; }
+  .gallery-btn svg { width: 18px; height: 18px; flex: none; }
+
   .capture-hint {
     margin: .75rem 0 0;
     font-size: .78rem;
@@ -338,6 +360,30 @@
   .more-btn:hover { border-color: var(--gold); color: var(--ink); }
   .more-btn:disabled { opacity: .55; cursor: default; }
 
+  .album-panel {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: .8rem;
+    padding: 1.4rem 1.4rem 2.4rem;
+    margin: 0 1.4rem;
+    border-top: 1px solid var(--line);
+    text-align: center;
+  }
+  .album-note {
+    margin: 0;
+    max-width: 34ch;
+    font-size: .8rem;
+    line-height: 1.5;
+    color: var(--ink-faint);
+  }
+  .album-progress {
+    margin: 0;
+    font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    font-size: .72rem;
+    color: var(--ink-soft);
+  }
+
   footer {
     text-align: center;
     padding: 0 1.4rem 2.4rem;
@@ -399,7 +445,7 @@
   .lb-btn.danger { border-color: rgba(235, 156, 156, .45); color: #eb9c9c; }
   .lb-btn.primary { background: var(--gold); border-color: var(--gold); color: #241a10; }
 
-  #camera-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+  #camera-input, #gallery-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 
   @media (prefers-reduced-motion: reduce) {
     .shutter-btn, .feed-card { transition: none; }
@@ -437,8 +483,18 @@
       </svg>
       <span id="btn-label">Сделать фото для общей ленты</span>
     </button>
-    <p class="capture-hint">Откроется камера телефона — снимок сразу попадёт в ленту ниже</p>
+    <button class="gallery-btn" id="gallery-btn" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="5" width="14" height="11" rx="2"/>
+        <circle cx="7.4" cy="9.2" r="1.1"/>
+        <path d="M4.4 15l3.6-3.8 2.6 2.7 2-2.1 3.4 3.2"/>
+        <path d="M8 19h10a3 3 0 0 0 3-3V8.5"/>
+      </svg>
+      Добавить из галереи
+    </button>
+    <p class="capture-hint" id="capture-hint">Снимок сразу попадёт в общую ленту ниже</p>
     <input id="camera-input" type="file" accept="image/*" capture="environment">
+    <input id="gallery-input" type="file" accept="image/*" multiple>
   </div>
 
   <div class="feed-head">
@@ -459,6 +515,12 @@
 
   <div class="feed-more" id="feed-more" hidden>
     <button class="more-btn" id="more-btn" type="button">Показать ещё</button>
+  </div>
+
+  <div class="album-panel" id="album-panel" hidden>
+    <p class="album-note">Скачать все фотографии гостей одним архивом. Лучше делать с компьютера — на телефоне большой альбом может не поместиться в память.</p>
+    <button class="more-btn" id="album-btn" type="button">Скачать весь альбом</button>
+    <p class="album-progress" id="album-progress" hidden></p>
   </div>
 
   <footer>ОЛЬГА &amp; МИХАИЛ · 19.09.2026</footer>
@@ -489,8 +551,11 @@
 
   var nameInput = document.getElementById("guest-name");
   var takeBtn = document.getElementById("take-photo-btn");
-  var btnLabel = document.getElementById("btn-label");
+  var galleryBtn = document.getElementById("gallery-btn");
   var cameraInput = document.getElementById("camera-input");
+  var galleryInput = document.getElementById("gallery-input");
+  var captureHint = document.getElementById("capture-hint");
+  var HINT_DEFAULT = captureHint.textContent;
   var feedGrid = document.getElementById("feed-grid");
   var feedEmpty = document.getElementById("feed-empty");
   var feedCount = document.getElementById("feed-count");
@@ -584,21 +649,67 @@
     writeStore("wedding_guest_name", nameInput.value.trim());
   });
 
-  /* ---------- съёмка и загрузка ---------- */
+  /* ---------- съёмка, выбор из галереи и загрузка ---------- */
   takeBtn.addEventListener("click", function () { cameraInput.click(); });
+  galleryBtn.addEventListener("click", function () { galleryInput.click(); });
+
+  /* список файлов у input живой: копируем его до очистки поля */
+  function takeFiles(input) {
+    var picked = [];
+    if (input.files) {
+      for (var i = 0; i < input.files.length; i++) picked.push(input.files[i]);
+    }
+    input.value = "";
+    return picked;
+  }
 
   cameraInput.addEventListener("change", function () {
-    var file = cameraInput.files && cameraInput.files[0];
-    cameraInput.value = "";
-    if (!file || uploading) return;
+    uploadFiles(takeFiles(cameraInput));
+  });
 
-    setUploading(true);
-    prepareImages(file, function (full, thumb) {
-      if (!full) {
-        window.alert("Не получилось обработать фото. Попробуйте другой снимок.");
-        setUploading(false);
+  galleryInput.addEventListener("change", function () {
+    uploadFiles(takeFiles(galleryInput));
+  });
+
+  function uploadFiles(list) {
+    if (uploading || !list || !list.length) return;
+
+    var queue = [];
+    for (var i = 0; i < list.length; i++) queue.push(list[i]);
+    var total = queue.length;
+    var index = 0;
+    var failed = 0;
+
+    setBusy(true);
+    step();
+
+    function step() {
+      if (!queue.length) {
+        setBusy(false);
+        pollNew();
+        if (failed && failed === total) {
+          window.alert(total > 1
+            ? "Не получилось добавить фотографии. Проверьте интернет и попробуйте ещё раз."
+            : "Не получилось добавить фото. Проверьте интернет и попробуйте ещё раз.");
+        } else if (failed) {
+          window.alert("Часть фотографий добавить не удалось: " + failed + " из " + total + ".");
+        }
         return;
       }
+      index++;
+      captureHint.textContent = total > 1
+        ? ("Сохраняем " + index + " из " + total + "…")
+        : "Сохраняем фото…";
+      uploadOne(queue.shift(), function (ok) {
+        if (!ok) failed++;
+        step();
+      });
+    }
+  }
+
+  function uploadOne(file, done) {
+    prepareImages(file, function (full, thumb) {
+      if (!full) { done(false); return; }
       var name = (nameInput.value || "").trim() || "Гость";
       api("photos?select=id", {
         method: "POST",
@@ -616,21 +727,21 @@
             myIds[rows[0].id] = true;
             saveMyIds();
           }
-          pollNew();
+          done(true);
         })
         .catch(function (err) {
           console.error(err);
-          window.alert("Не получилось загрузить фото. Проверьте интернет и попробуйте ещё раз.");
-        })
-        .then(function () { setUploading(false); });
+          done(false);
+        });
     });
-  });
+  }
 
-  function setUploading(state) {
+  function setBusy(state) {
     uploading = state;
     takeBtn.disabled = state;
+    galleryBtn.disabled = state;
     takeBtn.style.opacity = state ? ".6" : "";
-    btnLabel.textContent = state ? "Сохраняем фото…" : "Сделать фото для общей ленты";
+    if (!state) captureHint.textContent = HINT_DEFAULT;
   }
 
   /* ---------- сжатие: большая версия + миниатюра ---------- */
@@ -669,6 +780,124 @@
     canvas.height = ch;
     canvas.getContext("2d").drawImage(img, 0, 0, cw, ch);
     return canvas.toDataURL("image/jpeg", quality);
+  }
+
+
+  /* ---------- сохранение файлов ---------- */
+  function translit(s) {
+    var map = {
+      "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e", "ж": "zh",
+      "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o",
+      "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f", "х": "h", "ц": "ts",
+      "ч": "ch", "ш": "sh", "щ": "sch", "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya"
+    };
+    var out = "";
+    for (var i = 0; i < s.length; i++) {
+      var ch = s.charAt(i);
+      var low = ch.toLowerCase();
+      if (map.hasOwnProperty(low)) {
+        var t = map[low];
+        out += (ch === low) ? t : (t.charAt(0).toUpperCase() + t.slice(1));
+      } else if (/[a-zA-Z0-9]/.test(ch)) {
+        out += ch;
+      } else {
+        out += "-";
+      }
+    }
+    out = out.replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+    return out || "guest";
+  }
+
+  function downloadBlob(blob, filename) {
+    var objUrl = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = objUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(objUrl); }, 8000);
+  }
+
+  function dataUrlToBytes(dataUrl) {
+    var bin = atob(dataUrl.slice(dataUrl.indexOf(",") + 1));
+    var out = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  var crcTable = null;
+  function crc32(bytes) {
+    if (!crcTable) {
+      crcTable = new Uint32Array(256);
+      for (var n = 0; n < 256; n++) {
+        var c = n;
+        for (var k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        crcTable[n] = c >>> 0;
+      }
+    }
+    var crc = 0xFFFFFFFF;
+    for (var i = 0; i < bytes.length; i++) {
+      crc = crcTable[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+    }
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  function u16(v) { return [v & 255, (v >>> 8) & 255]; }
+  function u32(v) { return [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255]; }
+
+  function asciiBytes(s) {
+    var out = new Uint8Array(s.length);
+    for (var i = 0; i < s.length; i++) out[i] = s.charCodeAt(i) & 255;
+    return out;
+  }
+
+  /* собирает обычный zip без сжатия — jpeg всё равно уже сжат */
+  function makeZipEntry(name, data, when) {
+    var d = when || new Date();
+    var dosTime = (d.getHours() << 11) | (d.getMinutes() << 5) | Math.floor(d.getSeconds() / 2);
+    var dosDate = ((Math.max(1980, d.getFullYear()) - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+    return { name: asciiBytes(name), data: data, crc: crc32(data), time: dosTime, date: dosDate };
+  }
+
+  function zipBlob(entries) {
+    var chunks = [];
+    var central = [];
+    var offset = 0;
+    var i, j;
+
+    for (i = 0; i < entries.length; i++) {
+      var e = entries[i];
+      var local = [0x50, 0x4b, 0x03, 0x04]
+        .concat(u16(20), u16(0), u16(0), u16(e.time), u16(e.date))
+        .concat(u32(e.crc), u32(e.data.length), u32(e.data.length))
+        .concat(u16(e.name.length), u16(0));
+      var head = new Uint8Array(local.length + e.name.length);
+      head.set(local, 0);
+      head.set(e.name, local.length);
+      chunks.push(head, e.data);
+
+      var cdir = [0x50, 0x4b, 0x01, 0x02]
+        .concat(u16(20), u16(20), u16(0), u16(0), u16(e.time), u16(e.date))
+        .concat(u32(e.crc), u32(e.data.length), u32(e.data.length))
+        .concat(u16(e.name.length), u16(0), u16(0), u16(0), u16(0), u32(0), u32(offset));
+      var cd = new Uint8Array(cdir.length + e.name.length);
+      cd.set(cdir, 0);
+      cd.set(e.name, cdir.length);
+      central.push(cd);
+
+      offset += head.length + e.data.length;
+    }
+
+    var cdSize = 0;
+    for (j = 0; j < central.length; j++) cdSize += central[j].length;
+    var end = new Uint8Array(
+      [0x50, 0x4b, 0x05, 0x06]
+        .concat(u16(0), u16(0), u16(entries.length), u16(entries.length))
+        .concat(u32(cdSize), u32(offset), u16(0))
+    );
+
+    return new Blob(chunks.concat(central, [end]), { type: "application/zip" });
   }
 
   /* ---------- лента ---------- */
@@ -848,12 +1077,21 @@
   moreBtn.addEventListener("click", loadOlder);
 
   /* ---------- полноразмерное фото по запросу ---------- */
+  function prepareBlob(p) {
+    if (p.blob || !p.full) return;
+    fetch(p.full)
+      .then(function (r) { return r.blob(); })
+      .then(function (blob) { p.blob = blob; })
+      .catch(function () {});
+  }
+
   function loadFull(p, cb) {
-    if (p.full) { cb(p.full); return; }
+    if (p.full) { prepareBlob(p); cb(p.full); return; }
     apiRows("photos?select=photo_data&id=eq." + encodeURIComponent(p.id) + "&limit=1")
       .then(function (rows) {
         if (!rows || !rows.length) { cb(null); return; }
         p.full = rows[0].photo_data;
+        prepareBlob(p);
         cb(p.full);
       })
       .catch(function () { cb(null); });
@@ -888,23 +1126,35 @@
     if (e.target === lightbox) lightbox.hidden = true;
   });
 
+  function savePhotoBlob(blob, filename) {
+    var file = null;
+    try { file = new File([blob], filename, { type: "image/jpeg" }); } catch (e) {}
+    if (file && navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+      navigator.share({ files: [file] }).catch(function (err) {
+        if (err && err.name === "AbortError") return;
+        downloadBlob(blob, filename);
+      });
+      return;
+    }
+    downloadBlob(blob, filename);
+  }
+
   lbSave.addEventListener("click", function () {
     var p = currentPhoto;
     if (!p) return;
+    var filename = "svadba-" + translit(p.name) + "-" + formatTime(p.time).replace(":", "-") + ".jpg";
+
+    if (p.blob) {
+      savePhotoBlob(p.blob, filename);
+      return;
+    }
     loadFull(p, function (src) {
       if (!src) return;
-      var filename = "свадьба-" + p.name.replace(/[^a-zA-Zа-яА-Я0-9]+/g, "-") + ".jpg";
       fetch(src)
         .then(function (r) { return r.blob(); })
         .then(function (blob) {
-          var objUrl = URL.createObjectURL(blob);
-          var a = document.createElement("a");
-          a.href = objUrl;
-          a.download = filename;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          setTimeout(function () { URL.revokeObjectURL(objUrl); }, 4000);
+          p.blob = blob;
+          savePhotoBlob(blob, filename);
         })
         .catch(function () { window.open(src, "_blank"); });
     });
@@ -944,6 +1194,72 @@
         lbDelete.textContent = "Удалить";
       });
   });
+
+
+  /* ---------- скачать весь альбом (открывается по адресу с ?album) ---------- */
+  var albumPanel = document.getElementById("album-panel");
+  var albumBtn = document.getElementById("album-btn");
+  var albumProgress = document.getElementById("album-progress");
+  var albumBusy = false;
+
+  if (/album/i.test(location.search) || /album/i.test(location.hash)) {
+    albumPanel.hidden = false;
+  }
+
+  albumBtn.addEventListener("click", function () {
+    if (albumBusy) return;
+    albumBusy = true;
+    albumBtn.disabled = true;
+    albumProgress.hidden = false;
+    albumProgress.textContent = "Собираем фото…";
+    collectAlbum([], 0);
+  });
+
+  function finishAlbum(message) {
+    albumBusy = false;
+    albumBtn.disabled = false;
+    albumProgress.textContent = message;
+  }
+
+  function collectAlbum(entries, offset) {
+    var STEP = 10;
+    apiRows("photos?select=id,name,photo_data,created_at&order=created_at.asc&limit=" + STEP + "&offset=" + offset)
+      .then(function (rows) {
+        rows = rows || [];
+        for (var i = 0; i < rows.length; i++) {
+          var row = rows[i];
+          if (!row.photo_data) continue;
+          var when = row.created_at ? new Date(row.created_at) : new Date();
+          var num = String(entries.length + 1);
+          while (num.length < 3) num = "0" + num;
+          var fname = num + "_" + translit(row.name || "Гость") + "_" + formatTime(when).replace(":", "-") + ".jpg";
+          entries.push(makeZipEntry(fname, dataUrlToBytes(row.photo_data), when));
+        }
+        albumProgress.textContent = "Собрано " + entries.length + " фото…";
+        if (rows.length === STEP) {
+          collectAlbum(entries, offset + STEP);
+          return;
+        }
+        if (!entries.length) {
+          finishAlbum("В ленте пока нет фотографий.");
+          return;
+        }
+        albumProgress.textContent = "Упаковываем архив…";
+        setTimeout(function () {
+          try {
+            downloadBlob(zipBlob(entries), "olga-mikhail-wedding.zip");
+            finishAlbum("Готово: " + entries.length + " фото в архиве.");
+          } catch (err) {
+            console.error(err);
+            finishAlbum("Не хватило памяти для архива — попробуйте с компьютера.");
+          }
+        }, 50);
+      })
+      .catch(function (err) {
+        console.error(err);
+        finishAlbum("Не получилось собрать архив. Попробуйте ещё раз.");
+      });
+  }
 
   /* ---------- запуск ---------- */
   updateChrome();
