@@ -263,6 +263,22 @@
   }
 
   /* --- feed section --- */
+  .limit-line {
+    margin: .9rem 0 0;
+    font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    font-size: .74rem;
+    letter-spacing: .03em;
+    color: var(--gold);
+  }
+  .limit-line.spent { color: var(--wine); }
+  .limit-note {
+    margin: .4rem auto 0;
+    max-width: 30ch;
+    font-size: .73rem;
+    line-height: 1.45;
+    color: var(--ink-faint);
+  }
+
   .feed-head {
     display: flex;
     align-items: baseline;
@@ -473,7 +489,7 @@
 
   <div class="capture">
     <div class="name-field">
-      <label for="guest-name">Ваше имя</label>
+      <label for="guest-name">Твоё имя</label>
       <input id="guest-name" type="text" placeholder="по желанию" maxlength="30" autocomplete="off">
     </div>
     <button class="shutter-btn" id="take-photo-btn" type="button">
@@ -493,6 +509,8 @@
       Добавить из галереи
     </button>
     <p class="capture-hint" id="capture-hint">Снимок сразу попадёт в общую ленту ниже</p>
+    <p class="limit-line" id="limit-line" hidden><span id="limit-left"></span></p>
+    <p class="limit-note" id="limit-note" hidden>Мы сделали ограничение фото в 20 шт — выбирай самые лучшие кадры</p>
     <input id="camera-input" type="file" accept="image/*" capture="environment">
     <input id="gallery-input" type="file" accept="image/*" multiple>
   </div>
@@ -507,7 +525,7 @@
       <path d="M4 8.5a1 1 0 0 1 1-1h2.2l.8-1.4a1 1 0 0 1 .87-.5h6.26a1 1 0 0 1 .87.5l.8 1.4H19a1 1 0 0 1 1 1V18a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V8.5Z"/>
       <circle cx="12" cy="13" r="3.4"/>
     </svg>
-    <p>Пока фото нет — будьте первыми!</p>
+    <p>Пока фото нет — сделай первый кадр!</p>
     <p class="small">Каждое фото, снятое гостями, появится здесь</p>
   </div>
 
@@ -543,6 +561,7 @@
   var SUPABASE_URL = "https://hyzytitwpwsahtyfewvw.supabase.co/rest/v1/";
   var SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh5enl0aXR3cHdzYWh0eWZld3Z3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk0ODM3NTcsImV4cCI6MjEwNTA1OTc1N30.vvwi_fAl9iFKbeEK7fqEdlSa8S-0H8g3LF4qxVlUPis";
 
+  var PHOTO_LIMIT = 20;
   var PAGE_SIZE = 40;
   var POLL_MS = 6000;
   var RECONCILE_MS = 60000;
@@ -556,6 +575,9 @@
   var galleryInput = document.getElementById("gallery-input");
   var captureHint = document.getElementById("capture-hint");
   var HINT_DEFAULT = captureHint.textContent;
+  var limitLine = document.getElementById("limit-line");
+  var limitLeft = document.getElementById("limit-left");
+  var limitNote = document.getElementById("limit-note");
   var feedGrid = document.getElementById("feed-grid");
   var feedEmpty = document.getElementById("feed-empty");
   var feedCount = document.getElementById("feed-count");
@@ -579,6 +601,7 @@
   var uploading = false;
   var loadingOlder = false;
   var currentPhoto = null;
+  var photosLeft = null;
 
   /* ---------- обращение к базе напрямую, без внешних библиотек ---------- */
   function api(path, opts) {
@@ -649,6 +672,54 @@
     writeStore("wedding_guest_name", nameInput.value.trim());
   });
 
+  /* ---------- лимит кадров на один телефон ---------- */
+  function pluralFrames(n) {
+    var ten = n % 10, hundred = n % 100;
+    if (ten === 1 && hundred !== 11) return "кадр";
+    if (ten >= 2 && ten <= 4 && (hundred < 10 || hundred >= 20)) return "кадра";
+    return "кадров";
+  }
+
+  function updateLimitLabel() {
+    if (photosLeft === null) {
+      limitLine.hidden = true;
+      limitNote.hidden = true;
+      return;
+    }
+    limitLine.hidden = false;
+    limitNote.hidden = false;
+    if (photosLeft <= 0) {
+      limitLine.className = "limit-line spent";
+      limitLeft.textContent = "Твои " + PHOTO_LIMIT + " " + pluralFrames(PHOTO_LIMIT) + " закончились";
+    } else {
+      limitLine.className = "limit-line";
+      limitLeft.textContent = "У тебя "
+        + (photosLeft % 10 === 1 && photosLeft % 100 !== 11 ? "остался " : "осталось ")
+        + photosLeft + " " + pluralFrames(photosLeft);
+    }
+    applyButtonState();
+  }
+
+  function applyButtonState() {
+    var blocked = uploading || photosLeft === 0;
+    takeBtn.disabled = blocked;
+    galleryBtn.disabled = blocked;
+    takeBtn.style.opacity = blocked ? ".6" : "";
+  }
+
+  function refreshLeft(done) {
+    api("rpc/photos_left", { method: "POST", body: { p_key: ownerKey } })
+      .then(function (res) { return res.json(); })
+      .then(function (left) {
+        if (typeof left === "number") {
+          photosLeft = Math.max(0, left);
+          updateLimitLabel();
+        }
+      })
+      .catch(function () {})
+      .then(function () { if (done) done(); });
+  }
+
   /* ---------- съёмка, выбор из галереи и загрузка ---------- */
   takeBtn.addEventListener("click", function () { cameraInput.click(); });
   galleryBtn.addEventListener("click", function () { galleryInput.click(); });
@@ -676,6 +747,18 @@
 
     var queue = [];
     for (var i = 0; i < list.length; i++) queue.push(list[i]);
+
+    if (photosLeft !== null) {
+      if (photosLeft <= 0) {
+        window.alert("Лимит исчерпан: с одного телефона можно добавить не больше " + PHOTO_LIMIT + " фото. Удали что-то своё из ленты, чтобы освободить место.");
+        return;
+      }
+      if (queue.length > photosLeft) {
+        window.alert("Осталось мест: " + photosLeft + ". Добавим первые " + photosLeft + " из выбранных.");
+        queue = queue.slice(0, photosLeft);
+      }
+    }
+
     var total = queue.length;
     var index = 0;
     var failed = 0;
@@ -687,13 +770,18 @@
       if (!queue.length) {
         setBusy(false);
         pollNew();
-        if (failed && failed === total) {
-          window.alert(total > 1
-            ? "Не получилось добавить фотографии. Проверьте интернет и попробуйте ещё раз."
-            : "Не получилось добавить фото. Проверьте интернет и попробуйте ещё раз.");
-        } else if (failed) {
-          window.alert("Часть фотографий добавить не удалось: " + failed + " из " + total + ".");
-        }
+        refreshLeft(function () {
+          if (!failed) return;
+          if (photosLeft === 0 && failed === total) {
+            window.alert("Достигнут лимит: с одного телефона можно добавить не больше " + PHOTO_LIMIT + " фото.");
+          } else if (failed === total) {
+            window.alert(total > 1
+              ? "Не получилось добавить фотографии. Проверь интернет и попробуй ещё раз."
+              : "Не получилось добавить фото. Проверь интернет и попробуй ещё раз.");
+          } else {
+            window.alert("Часть фотографий добавить не удалось: " + failed + " из " + total + ".");
+          }
+        });
         return;
       }
       index++;
@@ -727,6 +815,10 @@
             myIds[rows[0].id] = true;
             saveMyIds();
           }
+          if (photosLeft !== null) {
+            photosLeft = Math.max(0, photosLeft - 1);
+            updateLimitLabel();
+          }
           done(true);
         })
         .catch(function (err) {
@@ -738,10 +830,8 @@
 
   function setBusy(state) {
     uploading = state;
-    takeBtn.disabled = state;
-    galleryBtn.disabled = state;
-    takeBtn.style.opacity = state ? ".6" : "";
     if (!state) captureHint.textContent = HINT_DEFAULT;
+    applyButtonState();
   }
 
   /* ---------- сжатие: большая версия + миниатюра ---------- */
@@ -926,7 +1016,7 @@
     meta.className = "meta";
     var who = document.createElement("span");
     who.className = "who";
-    who.textContent = myIds[p.id] ? p.name + " · вы" : p.name;
+    who.textContent = myIds[p.id] ? p.name + " · твоё" : p.name;
     var when = document.createElement("span");
     when.textContent = formatTime(p.time);
     meta.appendChild(who);
@@ -1184,10 +1274,15 @@
         totalCount = Math.max(0, totalCount - 1);
         updateChrome();
         lightbox.hidden = true;
+        if (photosLeft !== null) {
+          photosLeft = Math.min(PHOTO_LIMIT, photosLeft + 1);
+          updateLimitLabel();
+        }
+        refreshLeft();
       })
       .catch(function (err) {
         console.error(err);
-        window.alert("Не получилось удалить фото. Проверьте интернет и попробуйте ещё раз.");
+        window.alert("Не получилось удалить фото. Проверь интернет и попробуй ещё раз.");
       })
       .then(function () {
         lbDelete.disabled = false;
@@ -1251,19 +1346,20 @@
             finishAlbum("Готово: " + entries.length + " фото в архиве.");
           } catch (err) {
             console.error(err);
-            finishAlbum("Не хватило памяти для архива — попробуйте с компьютера.");
+            finishAlbum("Не хватило памяти для архива — попробуй с компьютера.");
           }
         }, 50);
       })
       .catch(function (err) {
         console.error(err);
-        finishAlbum("Не получилось собрать архив. Попробуйте ещё раз.");
+        finishAlbum("Не получилось собрать архив. Попробуй ещё раз.");
       });
   }
 
   /* ---------- запуск ---------- */
   updateChrome();
   loadInitial();
+  refreshLeft();
   setInterval(function () { if (!document.hidden) pollNew(); }, POLL_MS);
   setInterval(function () { if (!document.hidden) reconcile(); }, RECONCILE_MS);
   document.addEventListener("visibilitychange", function () {
