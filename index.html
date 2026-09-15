@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Ольга и Михаил</title>
 <style>
+  [hidden] { display: none !important; }
+
   :root {
     --ink: #241a10;
     --ink-soft: rgba(36, 26, 16, .64);
@@ -291,6 +293,9 @@
     color: inherit;
     display: block;
   }
+  .feed-card.mine {
+    box-shadow: 0 0 0 1.5px var(--gold), 0 8px 18px -10px var(--shadow);
+  }
   .feed-card:nth-child(3n+1) { transform: rotate(-1.1deg); }
   .feed-card:nth-child(3n+2) { transform: rotate(.9deg); }
   .feed-card:nth-child(3n) { transform: rotate(-.4deg); }
@@ -312,6 +317,26 @@
     color: var(--ink-faint);
   }
   .feed-card .meta .who { color: var(--ink-soft); font-weight: 700; }
+
+  .feed-more {
+    display: flex;
+    justify-content: center;
+    padding: 0 1.4rem 2.2rem;
+  }
+  .more-btn {
+    appearance: none;
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--ink-soft);
+    font-family: inherit;
+    font-size: .88rem;
+    font-weight: 500;
+    padding: .7rem 1.5rem;
+    border-radius: 999px;
+    cursor: pointer;
+  }
+  .more-btn:hover { border-color: var(--gold); color: var(--ink); }
+  .more-btn:disabled { opacity: .55; cursor: default; }
 
   footer {
     text-align: center;
@@ -351,6 +376,8 @@
   .lightbox .lb-actions {
     display: flex;
     gap: .7rem;
+    flex-wrap: wrap;
+    justify-content: center;
   }
   .lb-btn {
     appearance: none;
@@ -368,6 +395,8 @@
     align-items: center;
     gap: .4rem;
   }
+  .lb-btn:disabled { opacity: .5; cursor: default; }
+  .lb-btn.danger { border-color: rgba(235, 156, 156, .45); color: #eb9c9c; }
   .lb-btn.primary { background: var(--gold); border-color: var(--gold); color: #241a10; }
 
   #camera-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
@@ -428,6 +457,10 @@
 
   <div class="feed-grid" id="feed-grid" hidden></div>
 
+  <div class="feed-more" id="feed-more" hidden>
+    <button class="more-btn" id="more-btn" type="button">Показать ещё</button>
+  </div>
+
   <footer>ОЛЬГА &amp; МИХАИЛ · 19.09.2026</footer>
 </div>
 
@@ -436,20 +469,24 @@
   <div class="lb-meta" id="lb-meta"></div>
   <div class="lb-actions">
     <button class="lb-btn primary" id="lb-save" type="button">Сохранить фото</button>
+    <button class="lb-btn danger" id="lb-delete" type="button" hidden>Удалить</button>
     <button class="lb-btn" id="lb-close" type="button">Закрыть</button>
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script>
 (function () {
   "use strict";
 
-  var SUPABASE_URL = "https://hyzytitwpwsahtyfewvw.supabase.co";
+  var SUPABASE_URL = "https://hyzytitwpwsahtyfewvw.supabase.co/rest/v1/";
   var SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh5enl0aXR3cHdzYWh0eWZld3Z3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk0ODM3NTcsImV4cCI6MjEwNTA1OTc1N30.vvwi_fAl9iFKbeEK7fqEdlSa8S-0H8g3LF4qxVlUPis";
-  var db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-  var photos = [];
+  var PAGE_SIZE = 40;
+  var POLL_MS = 6000;
+  var RECONCILE_MS = 60000;
+  var FULL_MAX_CHARS = 700000;
+  var THUMB_MAX_CHARS = 90000;
+
   var nameInput = document.getElementById("guest-name");
   var takeBtn = document.getElementById("take-photo-btn");
   var btnLabel = document.getElementById("btn-label");
@@ -457,202 +494,465 @@
   var feedGrid = document.getElementById("feed-grid");
   var feedEmpty = document.getElementById("feed-empty");
   var feedCount = document.getElementById("feed-count");
+  var feedMore = document.getElementById("feed-more");
+  var moreBtn = document.getElementById("more-btn");
   var lightbox = document.getElementById("lightbox");
   var lbImg = document.getElementById("lb-img");
   var lbMeta = document.getElementById("lb-meta");
   var lbSave = document.getElementById("lb-save");
+  var lbDelete = document.getElementById("lb-delete");
   var lbClose = document.getElementById("lb-close");
 
+  var photos = [];
+  var byId = {};
+  var cardById = {};
+  var myIds = {};
+  var totalCount = 0;
+  var newestRaw = null;
+  var oldestRaw = null;
+  var mayHaveMore = false;
+  var uploading = false;
+  var loadingOlder = false;
+  var currentPhoto = null;
+
+  /* ---------- обращение к базе напрямую, без внешних библиотек ---------- */
+  function api(path, opts) {
+    opts = opts || {};
+    var headers = {
+      "apikey": SUPABASE_KEY,
+      "Authorization": "Bearer " + SUPABASE_KEY
+    };
+    if (opts.body) headers["Content-Type"] = "application/json";
+    if (opts.prefer) headers["Prefer"] = opts.prefer;
+    return fetch(SUPABASE_URL + path, {
+      method: opts.method || "GET",
+      headers: headers,
+      body: opts.body ? JSON.stringify(opts.body) : undefined
+    }).then(function (res) {
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res;
+    });
+  }
+
+  function apiRows(path) {
+    return api(path).then(function (res) { return res.json(); });
+  }
+
+  function listPhotos(filter, limit) {
+    var q = "photos?select=id,name,thumb_data,created_at&order=created_at.desc&limit=" + limit;
+    if (filter) q += "&" + filter;
+    return apiRows(q);
+  }
+
+  /* ---------- память телефона: имя, ключ владельца, свои фото ---------- */
+  function readStore(key, fallback) {
+    try {
+      var v = localStorage.getItem(key);
+      return v === null ? fallback : v;
+    } catch (e) { return fallback; }
+  }
+
+  function writeStore(key, value) {
+    try { localStorage.setItem(key, value); } catch (e) {}
+  }
+
+  var ownerKey = readStore("wedding_owner_key", null);
+  if (!ownerKey) {
+    ownerKey = (window.crypto && window.crypto.randomUUID)
+      ? window.crypto.randomUUID()
+      : "k" + Date.now().toString(36) + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+    writeStore("wedding_owner_key", ownerKey);
+  }
+
   try {
-    var savedName = localStorage.getItem("wedding_guest_name");
-    if (savedName) nameInput.value = savedName;
+    var savedIds = JSON.parse(readStore("wedding_my_photos", "[]"));
+    if (savedIds && savedIds.length) {
+      for (var s = 0; s < savedIds.length; s++) myIds[savedIds[s]] = true;
+    }
   } catch (e) {}
 
+  function saveMyIds() {
+    var list = [];
+    for (var id in myIds) if (myIds.hasOwnProperty(id)) list.push(id);
+    writeStore("wedding_my_photos", JSON.stringify(list));
+  }
+
+  var savedName = readStore("wedding_guest_name", "");
+  if (savedName) nameInput.value = savedName;
+
   nameInput.addEventListener("change", function () {
-    try { localStorage.setItem("wedding_guest_name", nameInput.value.trim()); } catch (e) {}
+    writeStore("wedding_guest_name", nameInput.value.trim());
   });
 
-  takeBtn.addEventListener("click", function () {
-    cameraInput.click();
-  });
-
-  var uploading = false;
+  /* ---------- съёмка и загрузка ---------- */
+  takeBtn.addEventListener("click", function () { cameraInput.click(); });
 
   cameraInput.addEventListener("change", function () {
     var file = cameraInput.files && cameraInput.files[0];
     cameraInput.value = "";
     if (!file || uploading) return;
 
-    uploading = true;
-    takeBtn.disabled = true;
-    takeBtn.style.opacity = ".6";
-    btnLabel.textContent = "Сохраняем фото…";
-
-    function fail() {
-      uploading = false;
-      takeBtn.disabled = false;
-      takeBtn.style.opacity = "";
-      btnLabel.textContent = "Сделать фото для общей ленты";
-    }
-
-    compressUnderLimit(file, 720000, function (dataUrl) {
-      if (!dataUrl) {
+    setUploading(true);
+    prepareImages(file, function (full, thumb) {
+      if (!full) {
         window.alert("Не получилось обработать фото. Попробуйте другой снимок.");
-        fail();
+        setUploading(false);
         return;
       }
       var name = (nameInput.value || "").trim() || "Гость";
-      db.from("photos").insert({ name: name, photo_data: dataUrl })
-        .then(function (res) {
-          if (res.error) {
-            console.error(res.error);
-            window.alert("Не получилось загрузить фото. Проверьте интернет и попробуйте ещё раз.");
-          } else {
-            loadPhotos();
+      api("photos?select=id", {
+        method: "POST",
+        prefer: "return=representation",
+        body: {
+          name: name,
+          photo_data: full,
+          thumb_data: thumb || full,
+          owner_key: ownerKey
+        }
+      })
+        .then(function (res) { return res.json(); })
+        .then(function (rows) {
+          if (rows && rows[0] && rows[0].id) {
+            myIds[rows[0].id] = true;
+            saveMyIds();
           }
+          pollNew();
         })
-        .then(fail);
+        .catch(function (err) {
+          console.error(err);
+          window.alert("Не получилось загрузить фото. Проверьте интернет и попробуйте ещё раз.");
+        })
+        .then(function () { setUploading(false); });
     });
   });
 
-  /** Downscale/recompress file until its dataURL fits under maxChars, trying a
-   *  few size/quality steps; calls cb(dataUrl) or cb(null) if the image never loads. */
-  function compressUnderLimit(file, maxChars, cb) {
-    var attempts = [
-      { maxDim: 1400, quality: 0.75 },
-      { maxDim: 1100, quality: 0.65 },
-      { maxDim: 900, quality: 0.55 },
-      { maxDim: 700, quality: 0.5 }
-    ];
+  function setUploading(state) {
+    uploading = state;
+    takeBtn.disabled = state;
+    takeBtn.style.opacity = state ? ".6" : "";
+    btnLabel.textContent = state ? "Сохраняем фото…" : "Сделать фото для общей ленты";
+  }
+
+  /* ---------- сжатие: большая версия + миниатюра ---------- */
+  function prepareImages(file, cb) {
     var reader = new FileReader();
     reader.onload = function () {
       var img = new Image();
       img.onload = function () {
-        var w = img.naturalWidth, h = img.naturalHeight;
-        var result = null;
-        for (var i = 0; i < attempts.length; i++) {
-          var a = attempts[i];
-          var scale = Math.min(1, a.maxDim / Math.max(w, h));
-          var cw = Math.max(1, Math.round(w * scale));
-          var ch = Math.max(1, Math.round(h * scale));
-          var canvas = document.createElement("canvas");
-          canvas.width = cw; canvas.height = ch;
-          var ctx = canvas.getContext("2d");
-          ctx.drawImage(img, 0, 0, cw, ch);
-          var dataUrl = canvas.toDataURL("image/jpeg", a.quality);
-          result = dataUrl;
-          if (dataUrl.length <= maxChars) break;
-        }
-        cb(result);
+        var full = encodeUnder(img, [[1400, 0.72], [1100, 0.62], [900, 0.55], [700, 0.5]], FULL_MAX_CHARS);
+        var thumb = encodeUnder(img, [[440, 0.6], [340, 0.5], [260, 0.45]], THUMB_MAX_CHARS);
+        cb(full, thumb);
       };
-      img.onerror = function () { cb(null); };
+      img.onerror = function () { cb(null, null); };
       img.src = reader.result;
     };
-    reader.onerror = function () { cb(null); };
+    reader.onerror = function () { cb(null, null); };
     reader.readAsDataURL(file);
   }
 
-  function formatTime(d) {
-    var hh = String(d.getHours()).padStart(2, "0");
-    var mm = String(d.getMinutes()).padStart(2, "0");
-    return hh + ":" + mm;
+  function encodeUnder(img, steps, maxChars) {
+    var out = null;
+    for (var i = 0; i < steps.length; i++) {
+      out = drawJpeg(img, steps[i][0], steps[i][1]);
+      if (out.length <= maxChars) return out;
+    }
+    return out;
   }
 
-  function renderFeed() {
-    feedCount.textContent = photos.length + " фото";
-    if (photos.length === 0) {
-      feedEmpty.hidden = false;
-      feedGrid.hidden = true;
-      feedGrid.innerHTML = "";
+  function drawJpeg(img, maxDim, quality) {
+    var w = img.naturalWidth, h = img.naturalHeight;
+    var scale = Math.min(1, maxDim / Math.max(w, h));
+    var cw = Math.max(1, Math.round(w * scale));
+    var ch = Math.max(1, Math.round(h * scale));
+    var canvas = document.createElement("canvas");
+    canvas.width = cw;
+    canvas.height = ch;
+    canvas.getContext("2d").drawImage(img, 0, 0, cw, ch);
+    return canvas.toDataURL("image/jpeg", quality);
+  }
+
+  /* ---------- лента ---------- */
+  function formatTime(d) {
+    return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+  }
+
+  function makeCard(p) {
+    var card = document.createElement("button");
+    card.type = "button";
+    card.className = myIds[p.id] ? "feed-card mine" : "feed-card";
+    card.setAttribute("aria-label", "Открыть фото от " + p.name);
+
+    var img = document.createElement("img");
+    img.alt = "Фото от " + p.name;
+    img.loading = "lazy";
+    img.decoding = "async";
+    if (p.thumb) {
+      img.src = p.thumb;
+    } else {
+      loadFull(p, function (src) { if (src) img.src = src; });
+    }
+    card.appendChild(img);
+
+    var meta = document.createElement("div");
+    meta.className = "meta";
+    var who = document.createElement("span");
+    who.className = "who";
+    who.textContent = myIds[p.id] ? p.name + " · вы" : p.name;
+    var when = document.createElement("span");
+    when.textContent = formatTime(p.time);
+    meta.appendChild(who);
+    meta.appendChild(when);
+    card.appendChild(meta);
+
+    card.addEventListener("click", function () { openLightbox(p); });
+    cardById[p.id] = card;
+    return card;
+  }
+
+  function addRows(rows, atEnd) {
+    var fresh = [];
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      if (byId[row.id]) continue;
+      var p = {
+        id: row.id,
+        name: row.name || "Гость",
+        thumb: row.thumb_data || null,
+        full: null,
+        raw: row.created_at,
+        time: row.created_at ? new Date(row.created_at) : new Date()
+      };
+      byId[p.id] = p;
+      fresh.push(p);
+    }
+    if (!fresh.length) return 0;
+
+    var j;
+    if (atEnd) {
+      for (j = 0; j < fresh.length; j++) {
+        photos.push(fresh[j]);
+        feedGrid.appendChild(makeCard(fresh[j]));
+      }
+    } else {
+      for (j = fresh.length - 1; j >= 0; j--) {
+        photos.unshift(fresh[j]);
+        feedGrid.insertBefore(makeCard(fresh[j]), feedGrid.firstChild);
+      }
+    }
+
+    for (j = 0; j < fresh.length; j++) {
+      var raw = fresh[j].raw;
+      if (!raw) continue;
+      if (!newestRaw || raw > newestRaw) newestRaw = raw;
+      if (!oldestRaw || raw < oldestRaw) oldestRaw = raw;
+    }
+    return fresh.length;
+  }
+
+  function dropPhoto(p) {
+    delete byId[p.id];
+    var idx = photos.indexOf(p);
+    if (idx >= 0) photos.splice(idx, 1);
+    var el = cardById[p.id];
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+    delete cardById[p.id];
+  }
+
+  function updateChrome() {
+    feedCount.textContent = Math.max(totalCount, photos.length) + " фото";
+    var empty = photos.length === 0;
+    feedEmpty.hidden = !empty;
+    feedGrid.hidden = empty;
+    feedMore.hidden = empty || !mayHaveMore;
+  }
+
+  function loadInitial() {
+    listPhotos(null, PAGE_SIZE)
+      .then(function (rows) {
+        rows = rows || [];
+        addRows(rows, true);
+        mayHaveMore = rows.length === PAGE_SIZE;
+        updateChrome();
+        refreshTotal();
+      })
+      .catch(function (err) { console.error(err); });
+  }
+
+  function refreshTotal() {
+    api("photos?select=id&limit=1", { prefer: "count=exact" })
+      .then(function (res) {
+        var range = res.headers.get("content-range");
+        if (!range) return;
+        var total = parseInt(range.split("/")[1], 10);
+        if (!isNaN(total)) {
+          totalCount = total;
+          updateChrome();
+        }
+      })
+      .catch(function () {});
+  }
+
+  function pollNew() {
+    var filter = newestRaw ? "created_at=gt." + encodeURIComponent(newestRaw) : null;
+    listPhotos(filter, 60)
+      .then(function (rows) {
+        var added = addRows(rows || [], false);
+        if (added) {
+          totalCount += added;
+          updateChrome();
+        }
+      })
+      .catch(function (err) { console.error(err); });
+  }
+
+  /* удалённые другими гостями фото исчезают из ленты без перезагрузки */
+  function reconcile() {
+    if (!photos.length) return;
+    apiRows("photos?select=id&order=created_at.desc&limit=400")
+      .then(function (rows) {
+        if (!rows || rows.length >= 400) return;
+        var alive = {};
+        for (var i = 0; i < rows.length; i++) alive[rows[i].id] = true;
+        var gone = [];
+        for (var j = 0; j < photos.length; j++) {
+          if (!alive[photos[j].id]) gone.push(photos[j]);
+        }
+        if (!gone.length) return;
+        for (var k = 0; k < gone.length; k++) dropPhoto(gone[k]);
+        totalCount = Math.max(0, totalCount - gone.length);
+        updateChrome();
+      })
+      .catch(function () {});
+  }
+
+  function loadOlder() {
+    if (loadingOlder || !oldestRaw) return;
+    loadingOlder = true;
+    moreBtn.disabled = true;
+    moreBtn.textContent = "Загружаем…";
+    listPhotos("created_at=lt." + encodeURIComponent(oldestRaw), PAGE_SIZE)
+      .then(function (rows) {
+        rows = rows || [];
+        addRows(rows, true);
+        mayHaveMore = rows.length === PAGE_SIZE;
+        updateChrome();
+      })
+      .catch(function (err) { console.error(err); })
+      .then(function () {
+        loadingOlder = false;
+        moreBtn.disabled = false;
+        moreBtn.textContent = "Показать ещё";
+      });
+  }
+
+  moreBtn.addEventListener("click", loadOlder);
+
+  /* ---------- полноразмерное фото по запросу ---------- */
+  function loadFull(p, cb) {
+    if (p.full) { cb(p.full); return; }
+    apiRows("photos?select=photo_data&id=eq." + encodeURIComponent(p.id) + "&limit=1")
+      .then(function (rows) {
+        if (!rows || !rows.length) { cb(null); return; }
+        p.full = rows[0].photo_data;
+        cb(p.full);
+      })
+      .catch(function () { cb(null); });
+  }
+
+  /* ---------- просмотр фото ---------- */
+  function openLightbox(p) {
+    currentPhoto = p;
+    var caption = p.name + " · " + formatTime(p.time);
+    lbImg.src = p.full || p.thumb || "";
+    lbDelete.hidden = !myIds[p.id];
+    lightbox.hidden = false;
+
+    if (p.full) {
+      lbMeta.textContent = caption;
+      lbSave.disabled = false;
       return;
     }
-    feedEmpty.hidden = true;
-    feedGrid.hidden = false;
-    feedGrid.innerHTML = "";
-    photos.forEach(function (p, i) {
-      var card = document.createElement("button");
-      card.type = "button";
-      card.className = "feed-card";
-      card.setAttribute("aria-label", "Открыть фото от " + p.name);
 
-      var img = document.createElement("img");
-      img.src = p.src;
-      img.loading = "lazy";
-      img.alt = "Фото от " + p.name;
-      card.appendChild(img);
-
-      var meta = document.createElement("div");
-      meta.className = "meta";
-      var who = document.createElement("span");
-      who.className = "who";
-      who.textContent = p.name;
-      var when = document.createElement("span");
-      when.textContent = formatTime(p.time);
-      meta.appendChild(who);
-      meta.appendChild(when);
-      card.appendChild(meta);
-
-      card.addEventListener("click", function () { openLightbox(i); });
-      feedGrid.appendChild(card);
+    lbMeta.textContent = caption + " · загружаем…";
+    lbSave.disabled = true;
+    loadFull(p, function (src) {
+      if (currentPhoto !== p) return;
+      lbMeta.textContent = caption;
+      lbSave.disabled = false;
+      if (src) lbImg.src = src;
     });
   }
 
-  var currentPhoto = null;
-
-  function openLightbox(i) {
-    var p = photos[i];
-    currentPhoto = p;
-    lbImg.src = p.src;
-    lbMeta.textContent = p.name + " · " + formatTime(p.time);
-    lightbox.hidden = false;
-  }
   lbClose.addEventListener("click", function () { lightbox.hidden = true; });
   lightbox.addEventListener("click", function (e) {
     if (e.target === lightbox) lightbox.hidden = true;
   });
 
   lbSave.addEventListener("click", function () {
-    if (!currentPhoto) return;
-    var filename = "свадьба-" + currentPhoto.name.replace(/[^a-zA-Zа-яА-Я0-9]+/g, "-") + ".jpg";
-    fetch(currentPhoto.src)
-      .then(function (r) { return r.blob(); })
-      .then(function (blob) {
-        var objUrl = URL.createObjectURL(blob);
-        var a = document.createElement("a");
-        a.href = objUrl;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTimeout(function () { URL.revokeObjectURL(objUrl); }, 4000);
-      })
-      .catch(function () { window.open(currentPhoto.src, "_blank"); });
+    var p = currentPhoto;
+    if (!p) return;
+    loadFull(p, function (src) {
+      if (!src) return;
+      var filename = "свадьба-" + p.name.replace(/[^a-zA-Zа-яА-Я0-9]+/g, "-") + ".jpg";
+      fetch(src)
+        .then(function (r) { return r.blob(); })
+        .then(function (blob) {
+          var objUrl = URL.createObjectURL(blob);
+          var a = document.createElement("a");
+          a.href = objUrl;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          setTimeout(function () { URL.revokeObjectURL(objUrl); }, 4000);
+        })
+        .catch(function () { window.open(src, "_blank"); });
+    });
   });
 
-  renderFeed();
+  /* ---------- удаление своего фото ---------- */
+  lbDelete.addEventListener("click", function () {
+    var p = currentPhoto;
+    if (!p || !myIds[p.id]) return;
+    if (!window.confirm("Удалить это фото из общей ленты? Отменить будет нельзя.")) return;
 
-  function loadPhotos() {
-    db.from("photos")
-      .select("id,name,photo_data,created_at")
-      .order("created_at", { ascending: false })
-      .limit(500)
-      .then(function (res) {
-        if (res.error) { console.error(res.error); return; }
-        photos = res.data.map(function (row) {
-          return {
-            id: row.id,
-            src: row.photo_data,
-            name: row.name || "Гость",
-            time: row.created_at ? new Date(row.created_at) : new Date()
-          };
-        });
-        renderFeed();
+    lbDelete.disabled = true;
+    lbDelete.textContent = "Удаляем…";
+    api("rpc/delete_my_photo", {
+      method: "POST",
+      body: { p_id: p.id, p_key: ownerKey }
+    })
+      .then(function (res) { return res.json(); })
+      .then(function (ok) {
+        if (ok !== true) {
+          window.alert("Это фото удалить нельзя — похоже, оно снято с другого телефона.");
+          return;
+        }
+        delete myIds[p.id];
+        saveMyIds();
+        dropPhoto(p);
+        totalCount = Math.max(0, totalCount - 1);
+        updateChrome();
+        lightbox.hidden = true;
       })
-      .catch(function (err) { console.error(err); });
-  }
+      .catch(function (err) {
+        console.error(err);
+        window.alert("Не получилось удалить фото. Проверьте интернет и попробуйте ещё раз.");
+      })
+      .then(function () {
+        lbDelete.disabled = false;
+        lbDelete.textContent = "Удалить";
+      });
+  });
 
-  loadPhotos();
-  setInterval(loadPhotos, 4000);
+  /* ---------- запуск ---------- */
+  updateChrome();
+  loadInitial();
+  setInterval(function () { if (!document.hidden) pollNew(); }, POLL_MS);
+  setInterval(function () { if (!document.hidden) reconcile(); }, RECONCILE_MS);
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) pollNew();
+  });
 })();
 </script>
 </body>
