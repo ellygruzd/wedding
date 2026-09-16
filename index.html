@@ -211,6 +211,7 @@
     text-align: center;
   }
   .name-field input:focus { outline: none; border-color: var(--gold); }
+  .name-field input.needed { border-bottom-color: var(--gold); }
 
   .shutter-btn {
     appearance: none;
@@ -490,7 +491,7 @@
   <div class="capture">
     <div class="name-field">
       <label for="guest-name">Твоё имя</label>
-      <input id="guest-name" type="text" placeholder="по желанию" maxlength="30" autocomplete="off">
+      <input id="guest-name" type="text" placeholder="напиши имя" maxlength="30" autocomplete="name" required>
     </div>
     <button class="shutter-btn" id="take-photo-btn" type="button">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -510,7 +511,7 @@
     </button>
     <p class="capture-hint" id="capture-hint">Снимок сразу попадёт в общую ленту ниже</p>
     <p class="limit-line" id="limit-line" hidden><span id="limit-left"></span></p>
-    <p class="limit-note" id="limit-note" hidden>Мы сделали ограничение фото в 20 шт — выбирай самые лучшие кадры</p>
+    <p class="limit-note" id="limit-note" hidden>Мы сделали ограничение фото в 20&nbsp;шт — выбирай самые лучшие кадры</p>
     <input id="camera-input" type="file" accept="image/*" capture="environment">
     <input id="gallery-input" type="file" accept="image/*" multiple>
   </div>
@@ -665,11 +666,32 @@
     writeStore("wedding_my_photos", JSON.stringify(list));
   }
 
+  var HINT_NAME = "Напиши своё имя — так будет видно, кто снял кадр";
+
   var savedName = readStore("wedding_guest_name", "");
   if (savedName) nameInput.value = savedName;
 
-  nameInput.addEventListener("change", function () {
-    writeStore("wedding_guest_name", nameInput.value.trim());
+  function guestName() {
+    return (nameInput.value || "").trim();
+  }
+
+  function nameOk() {
+    return guestName().length > 0;
+  }
+
+  function updateHint(progress) {
+    if (progress) {
+      captureHint.textContent = progress;
+      return;
+    }
+    captureHint.textContent = nameOk() ? HINT_DEFAULT : HINT_NAME;
+  }
+
+  nameInput.addEventListener("input", function () {
+    nameInput.className = nameOk() ? "" : "needed";
+    writeStore("wedding_guest_name", guestName());
+    updateHint();
+    applyButtonState();
   });
 
   /* ---------- лимит кадров на один телефон ---------- */
@@ -701,7 +723,7 @@
   }
 
   function applyButtonState() {
-    var blocked = uploading || photosLeft === 0;
+    var blocked = uploading || photosLeft === 0 || !nameOk();
     takeBtn.disabled = blocked;
     galleryBtn.disabled = blocked;
     takeBtn.style.opacity = blocked ? ".6" : "";
@@ -721,8 +743,21 @@
   }
 
   /* ---------- съёмка, выбор из галереи и загрузка ---------- */
-  takeBtn.addEventListener("click", function () { cameraInput.click(); });
-  galleryBtn.addEventListener("click", function () { galleryInput.click(); });
+  function requireName() {
+    if (nameOk()) return true;
+    nameInput.className = "needed";
+    updateHint();
+    try { nameInput.focus(); } catch (e) {}
+    return false;
+  }
+
+  takeBtn.addEventListener("click", function () {
+    if (requireName()) cameraInput.click();
+  });
+
+  galleryBtn.addEventListener("click", function () {
+    if (requireName()) galleryInput.click();
+  });
 
   /* список файлов у input живой: копируем его до очистки поля */
   function takeFiles(input) {
@@ -744,6 +779,7 @@
 
   function uploadFiles(list) {
     if (uploading || !list || !list.length) return;
+    if (!requireName()) return;
 
     var queue = [];
     for (var i = 0; i < list.length; i++) queue.push(list[i]);
@@ -785,9 +821,7 @@
         return;
       }
       index++;
-      captureHint.textContent = total > 1
-        ? ("Сохраняем " + index + " из " + total + "…")
-        : "Сохраняем фото…";
+      updateHint(total > 1 ? ("Сохраняем " + index + " из " + total + "…") : "Сохраняем фото…");
       uploadOne(queue.shift(), function (ok) {
         if (!ok) failed++;
         step();
@@ -798,7 +832,7 @@
   function uploadOne(file, done) {
     prepareImages(file, function (full, thumb) {
       if (!full) { done(false); return; }
-      var name = (nameInput.value || "").trim() || "Гость";
+      var name = guestName() || "Гость";
       api("photos?select=id", {
         method: "POST",
         prefer: "return=representation",
@@ -830,7 +864,7 @@
 
   function setBusy(state) {
     uploading = state;
-    if (!state) captureHint.textContent = HINT_DEFAULT;
+    if (!state) updateHint();
     applyButtonState();
   }
 
@@ -1357,6 +1391,8 @@
   }
 
   /* ---------- запуск ---------- */
+  nameInput.className = nameOk() ? "" : "needed";
+  updateHint();
   updateChrome();
   loadInitial();
   refreshLeft();
