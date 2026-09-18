@@ -832,7 +832,7 @@
   function loadMyIds() {
     apiRows("photos?select=id&owner_key=eq." + ownerHash + "&limit=" + (PHOTO_LIMIT * 2))
       .then(function (rows) {
-        if (!rows) return;
+        if (Object.prototype.toString.call(rows) !== "[object Array]") return;
         /* своих кадров физически не может быть больше лимита: если база вернула
            больше, значит фильтр по владельцу не сработал — такой ответ игнорируем */
         if (rows.length > PHOTO_LIMIT) return;
@@ -1334,7 +1334,7 @@
   function loadInitial() {
     listPhotos(null, PAGE_SIZE)
       .then(function (rows) {
-        rows = rows || [];
+        if (Object.prototype.toString.call(rows) !== "[object Array]") return;
         addRows(rows, true);
         mayHaveMore = rows.length === PAGE_SIZE;
         updateChrome();
@@ -1361,7 +1361,8 @@
     var filter = newestRaw ? "created_at=gt." + encodeURIComponent(newestRaw) : null;
     listPhotos(filter, 60)
       .then(function (rows) {
-        var added = addRows(rows || [], false);
+        if (Object.prototype.toString.call(rows) !== "[object Array]") return;
+        var added = addRows(rows, false);
         if (added) {
           totalCount += added;
           updateChrome();
@@ -1376,7 +1377,8 @@
   function reconcile() {
     apiRows("photos?select=id&order=created_at.desc&limit=400")
       .then(function (rows) {
-        if (!rows) return;
+        /* только настоящий список годится: иначе решим, что база пуста, и сотрём ленту */
+        if (!rows || Object.prototype.toString.call(rows) !== "[object Array]") return;
         var capped = rows.length >= 400;
 
         var alive = {};
@@ -1407,7 +1409,7 @@
   function fetchByIds(ids) {
     apiRows("photos?select=id,name,thumb_data,created_at&id=in.(" + ids.join(",") + ")&order=created_at.desc")
       .then(function (rows) {
-        if (!rows || !rows.length) return;
+        if (Object.prototype.toString.call(rows) !== "[object Array]" || !rows.length) return;
         mergeRows(rows);
       })
       .catch(function () {});
@@ -1436,7 +1438,7 @@
     moreBtn.textContent = "Загружаем…";
     listPhotos("created_at=lt." + encodeURIComponent(oldestRaw), PAGE_SIZE)
       .then(function (rows) {
-        rows = rows || [];
+        if (Object.prototype.toString.call(rows) !== "[object Array]") return;
         addRows(rows, true);
         mayHaveMore = rows.length === PAGE_SIZE;
         updateChrome();
@@ -1639,6 +1641,20 @@
         console.error(err);
         finishAlbum("Не получилось собрать архив. Попробуй ещё раз.");
       });
+  }
+
+  /* Встроенный браузер внутри приложения хранит данные отдельно от Safari,
+     поэтому метка гостя туда не переносится — предупреждаем об этом. */
+  function looksLikeInAppBrowser() {
+    var ua = navigator.userAgent || "";
+    if (window.TelegramWebviewProxy || window.TelegramWebview) return true;
+    if (window.AndroidBridge && /VK/i.test(ua)) return true;
+    return /Telegram|Instagram|FBAN|FBAV|FB_IAB|VKAndroidApp|OKApp|Viber|Line\//i.test(ua);
+  }
+
+  if (looksLikeInAppBrowser()) {
+    var note = document.getElementById("inapp-note");
+    if (note) note.hidden = false;
   }
 
   /* ---------- обновление ленты ---------- */
